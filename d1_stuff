@@ -1,0 +1,411 @@
+library(ggplot2)
+library(tidyverse)
+library(caret)
+library(caTools)
+library(dplyr)
+library(randomForest)
+library(Metrics)
+library(viridis)
+library(plotly)
+library(scales)
+
+#####READING AND CLEANING TRAINING DATA#####
+
+# Read in the model training data
+training_data <- read.csv("DATA.csv")
+
+
+#Add linweight variable to quantify each play, training data
+training_data$linweight <- (ifelse(
+  (training_data$PitchCall %in% c('InPlay') & training_data$PlayResult == 'HomeRun'),
+  1.374328827,
+  ifelse(
+    (training_data$PitchCall %in% c('InPlay') & training_data$PlayResult == 'Triple'),
+    1.05755625,
+    ifelse(
+      (training_data$PitchCall %in% c('InPlay') & training_data$PlayResult == 'Double'),
+      0.766083123,
+      ifelse(
+        (training_data$PitchCall %in% c('InPlay') & training_data$PlayResult == 'Single'),
+        0.467292971,
+        ifelse(
+          (training_data$PitchCall %in% c('BallCalled', 'BallinDirt', 'BallIntentional', 'HitByPitch') & !is.na(training_data$PitchCall)),
+          0.063688329,
+          ifelse(
+            (training_data$PitchCall %in% c('FoulBall') & !is.na(training_data$PitchCall)),
+            -0.038050274,
+            ifelse(
+              (training_data$PitchCall %in% c('StrikeCalled') & !is.na(training_data$PitchCall)),
+              -0.065092516,
+              ifelse(
+                (training_data$PitchCall %in% c('StrikeSwinging') & !is.na(training_data$PitchCall)),
+                -0.118124936,
+                ifelse(
+                  (training_data$PitchCall == 'InPlay' & training_data$OutsOnPlay == 3),
+                  -0.789788814,
+                  ifelse(
+                    (training_data$PitchCall == 'InPlay' & training_data$OutsOnPlay == 2 & training_data$TaggedHitType %in% c('LineDrive', 'GroundBall', 'FlyBall')),
+                    -0.789788814,
+                    ifelse(
+                      (training_data$PitchCall == 'InPlay' & training_data$PlayResult %in% c('Error')),
+                      -0.236889646,
+                      ifelse(
+                        (training_data$PitchCall == 'InPlay' & training_data$TaggedHitType %in% c('LineDrive', 'FlyBall') & training_data$PlayResult == 'Sacrifice'),
+                        -0.236889646,
+                        ifelse(
+                          (training_data$PitchCall == 'InPlay' & training_data$PlayResult %in% c('FieldersChoice', 'Out', 'Sacrifice')),
+                          -0.195568767,
+                          NA
+))))))))))))))
+
+#Check for NA's in linweights column
+nas <- training_data[is.na(training_data$linweight),]
+
+# Add PitchGroup Variable with handling for NA values
+training_data$PitchGroup <- (ifelse(
+  (training_data$TaggedPitchType %in% c('Fastball', 'Four-Seam', 'Sinker', 'Cutter', 'FourSeamFastBall') & !is.na(training_data$TaggedPitchType)),
+  'FB',
+  ifelse(
+    (training_data$TaggedPitchType %in% c('Curveball', 'Slider', 'Sweeper', 'ChangeUp', 'Splitter', 'Forkball') & !is.na(training_data$TaggedPitchType)),
+    'OS',
+    'Other'
+)))
+
+#Checking number or observations in each group before filtering
+training_data %>%
+  group_by(PitcherThrows, BatterSide, PitchGroup) %>%
+  summarise(number_of_pitches = n())
+
+
+#Omit all rows that do not have all values in our important variables
+training_data <- training_data %>%  filter(PitchGroup != 'Other')
+training_data <- training_data %>%  filter(BatterSide != 'Undefined')
+training_data <- training_data %>%  filter(PitcherThrows != 'Undefined')
+training_data <- training_data %>%  filter(!is.na(RelSpeed))
+training_data <- training_data %>%  filter(!is.na(InducedVertBreak))
+training_data <- training_data %>%  filter(!is.na(HorzBreak))
+training_data <- training_data %>%  filter(!is.na(VertRelAngle))
+training_data <- training_data %>%  filter(!is.na(HorzRelAngle))
+training_data <- training_data %>%  filter(!is.na(SpinRate))
+training_data <- training_data %>%  filter(!is.na(SpinAxis))
+training_data <- training_data %>%  filter(!is.na(RelHeight))
+training_data <- training_data %>%  filter(!is.na(RelSide))
+training_data <- training_data %>%  filter(!is.na(Extension))
+
+
+
+#Checking number or observations in each group after filtering
+training_data %>%
+  group_by(PitcherThrows, BatterSide, PitchGroup) %>%
+  summarise(number_of_pitches = n())
+
+#Checking to confirm Velocity data matches assumptions
+training_data %>%
+  mutate(side =if_else(PitcherThrows == 'Right',
+                       'Right-Handed Pitcher',
+                       'Left-Handed Pitcher'),
+         side = fct_relevel(side, 'Right-Handed Pitcher')) %>% 
+  ggplot(aes(x=PitchGroup, y=RelSpeed)) +
+  geom_violin(aes(fill = side), alpha = 0.8,
+              draw_quantiles = c(0.25, 0.5, 0.75))
+
+#Checking to confirm Vertical Movement data matches assumptions
+training_data %>%
+  mutate(side =if_else(PitcherThrows == 'Right',
+                       'Right-Handed Pitcher',
+                       'Left-Handed Pitcher'),
+         side = fct_relevel(side, 'Right-Handed Pitcher')) %>% 
+  ggplot(aes(x=PitchGroup, y=InducedVertBreak)) +
+  geom_violin(aes(fill = side), alpha = 0.8,
+              draw_quantiles = c(0.25, 0.5, 0.75))
+
+#Checking to confirm Horizontal Movement data matches assumptions
+training_data %>%
+  mutate(side =if_else(PitcherThrows == 'Right',
+                       'Right-Handed Pitcher',
+                       'Left-Handed Pitcher'),
+         side = fct_relevel(side, 'Right-Handed Pitcher')) %>% 
+  ggplot(aes(x=HorzBreak, y=PitchGroup)) +
+  geom_violin(aes(fill = side), alpha = 0.8,
+              draw_quantiles = c(0.25, 0.5, 0.75))
+
+??plotly
+#Splitting groups into new data frames
+r_fb <- training_data[training_data$PitcherThrows == 'Right' & training_data$PitchGroup == 'FB',]
+r_os <- training_data[training_data$PitcherThrows == 'Right' & training_data$PitchGroup == 'OS',]
+l_fb <- training_data[training_data$PitcherThrows == 'Right' & training_data$PitchGroup == 'FB',]
+l_os <- training_data[training_data$PitcherThrows == 'Right' & training_data$PitchGroup == 'OS',]
+
+
+#####READING AND CLEANING TESTING DATA#####
+
+# Read in the model testing data
+testing_data <- read.csv("C:/Users/david/Desktop/GMU Files/Baseball Internship/Gameday Files/ALLFALL.csv")
+
+
+#Add linweight variable to quantify each play, training data
+testing_data$linweight <- (ifelse(
+  (testing_data$PitchCall %in% c('InPlay') & testing_data$PlayResult == 'HomeRun'),
+  1.374328827,
+  ifelse(
+    (testing_data$PitchCall %in% c('InPlay') & testing_data$PlayResult == 'Triple'),
+    1.05755625,
+    ifelse(
+      (testing_data$PitchCall %in% c('InPlay') & testing_data$PlayResult == 'Double'),
+      0.766083123,
+      ifelse(
+        (testing_data$PitchCall %in% c('InPlay') & testing_data$PlayResult == 'Single'),
+        0.467292971,
+        ifelse(
+          (testing_data$PitchCall %in% c('BallCalled', 'BallinDirt', 'BallIntentional', 'HitByPitch') & !is.na(testing_data$PitchCall)),
+          0.063688329,
+          ifelse(
+            (testing_data$PitchCall %in% c('FoulBall') & !is.na(testing_data$PitchCall)),
+            -0.038050274,
+            ifelse(
+              (testing_data$PitchCall %in% c('StrikeCalled') & !is.na(testing_data$PitchCall)),
+              -0.065092516,
+              ifelse(
+                (testing_data$PitchCall %in% c('StrikeSwinging') & !is.na(testing_data$PitchCall)),
+                -0.118124936,
+                ifelse(
+                  (testing_data$PitchCall == 'InPlay' & testing_data$OutsOnPlay == 3),
+                  -0.789788814,
+                  ifelse(
+                    (testing_data$PitchCall == 'InPlay' & testing_data$OutsOnPlay == 2 & testing_data$TaggedHitType %in% c('LineDrive', 'GroundBall', 'FlyBall')),
+                    -0.789788814,
+                    ifelse(
+                      (testing_data$PitchCall == 'InPlay' & testing_data$PlayResult %in% c('Error')),
+                      -0.236889646,
+                      ifelse(
+                        (testing_data$PitchCall == 'InPlay' & testing_data$TaggedHitType %in% c('LineDrive', 'FlyBall') & testing_data$PlayResult == 'Sacrifice'),
+                        -0.236889646,
+                        ifelse(
+                          (testing_data$PitchCall == 'InPlay' & testing_data$PlayResult %in% c('FieldersChoice', 'Out', 'Sacrifice')),
+                          -0.195568767,
+                          NA
+                        ))))))))))))))
+
+#Check for NA's in linweights column
+nas <- testing_data[is.na(testing_data$linweight),]
+
+
+# Add PitchGroup Variable with handling for NA values
+testing_data$PitchGroup <- (ifelse(
+  (testing_data$TaggedPitchType %in% c('Fastball', 'Four-Seam', 'Sinker', 'Cutter', 'FourSeamFastBall') & !is.na(testing_data$TaggedPitchType)),
+  'FB',
+  ifelse(
+    (testing_data$TaggedPitchType %in% c('Curveball', 'Slider', 'Sweeper', 'ChangeUp', 'Splitter', 'Forkball') & !is.na(testing_data$TaggedPitchType)),
+    'OS',
+    'Other'
+  )))
+
+#Checking number or observations in each group before filtering
+testing_data %>%
+  group_by(PitcherThrows, BatterSide, PitchGroup) %>%
+  summarise(number_of_pitches = n())
+
+
+#Omit all rows that do not have all values in our important variables
+testing_data <- testing_data %>%  filter(PitchGroup != 'Other')
+testing_data <- testing_data %>%  filter(BatterSide != 'Undefined')
+testing_data <- testing_data %>%  filter(PitcherThrows != 'Undefined')
+testing_data <- testing_data %>%  filter(!is.na(RelSpeed))
+testing_data <- testing_data %>%  filter(!is.na(InducedVertBreak))
+testing_data <- testing_data %>%  filter(!is.na(HorzBreak))
+testing_data <- testing_data %>%  filter(!is.na(VertRelAngle))
+testing_data <- testing_data %>%  filter(!is.na(HorzRelAngle))
+testing_data <- testing_data %>%  filter(!is.na(SpinRate))
+testing_data <- testing_data %>%  filter(!is.na(SpinAxis))
+testing_data <- testing_data %>%  filter(!is.na(RelHeight))
+testing_data <- testing_data %>%  filter(!is.na(RelSide))
+testing_data <- testing_data %>%  filter(!is.na(Extension))
+
+
+
+#Checking number or observations in each group after filtering
+testing_data %>%
+  group_by(PitcherThrows, BatterSide, PitchGroup) %>%
+  summarise(number_of_pitches = n())
+
+#Checking to confirm Velocity data matches assumptions
+testing_data %>%
+  mutate(side =if_else(PitcherThrows == 'Right',
+                       'Right-Handed Pitcher',
+                       'Left-Handed Pitcher'),
+         side = fct_relevel(side, 'Right-Handed Pitcher')) %>% 
+  ggplot(aes(x=PitchGroup, y=RelSpeed)) +
+  geom_violin(aes(fill = side), alpha = 0.8,
+              draw_quantiles = c(0.25, 0.5, 0.75))
+
+#Checking to confirm Vertical Movement data matches assumptions
+testing_data %>%
+  mutate(side =if_else(PitcherThrows == 'Right',
+                       'Right-Handed Pitcher',
+                       'Left-Handed Pitcher'),
+         side = fct_relevel(side, 'Right-Handed Pitcher')) %>% 
+  ggplot(aes(x=PitchGroup, y=InducedVertBreak)) +
+  geom_violin(aes(fill = side), alpha = 0.8,
+              draw_quantiles = c(0.25, 0.5, 0.75))
+
+#Checking to confirm Horizontal Movement data matches assumptions
+testing_data %>%
+  mutate(side =if_else(PitcherThrows == 'Right',
+                       'Right-Handed Pitcher',
+                       'Left-Handed Pitcher'),
+         side = fct_relevel(side, 'Right-Handed Pitcher')) %>% 
+  ggplot(aes(x=HorzBreak, y=PitchGroup)) +
+  geom_violin(aes(fill = side), alpha = 0.8,
+              draw_quantiles = c(0.25, 0.5, 0.75))
+
+
+#Splitting groups into new data frames
+r_fb_test <- testing_data[testing_data$PitcherThrows == 'Right' & testing_data$PitchGroup == 'FB',]
+r_os_test <- testing_data[testing_data$PitcherThrows == 'Right' & testing_data$PitchGroup == 'OS',]
+l_fb_test <- testing_data[testing_data$PitcherThrows == 'Right' & testing_data$PitchGroup == 'FB',]
+l_os_test <- testing_data[testing_data$PitcherThrows == 'Right' & testing_data$PitchGroup == 'OS',]
+
+
+
+
+
+
+
+
+#####CREATING THE MODELS#####
+
+#Specifying columns to be included in the model
+spec_col <- c('RelSpeed', 'InducedVertBreak', 'HorzBreak',
+              'RelHeight', 'RelSide', 'Extension')
+
+#Running the RandomForest Models
+r_fb_model <- randomForest(x = r_fb[, spec_col], y = r_fb$linweight, ntree = 1000)
+saveRDS(r_fb_model, "C:/Users/david/Desktop/GMU Files/Baseball Internship/Stuff Models/r_fb.rds")
+r_os_model <- randomForest(x = r_os[, spec_col], y = r_os$linweight, ntree = 100)
+saveRDS(r_os_model, "C:/Users/david/Desktop/GMU Files/Baseball Internship/Stuff Models/r_os.rds")
+l_fb_model <- randomForest(x = l_fb[, spec_col], y = l_fb$linweight, ntree = 100)
+saveRDS(l_fb_model, "C:/Users/david/Desktop/GMU Files/Baseball Internship/Stuff Models/l_fb.rds")
+l_os_model <- randomForest(x = l_os[, spec_col], y = l_os$linweight, ntree = 100)
+saveRDS(l_os_model, "C:/Users/david/Desktop/GMU Files/Baseball Internship/Stuff Models/l_os.rds")
+
+
+#Run the r_fb model with the test data and plot Predictions vs Actual
+r_fb_pred <- predict(r_fb_model, newdata = r_fb_test[, spec_col], type= "class")
+plot(r_fb_pred, r_fb_test$linweight)
+aa <- rmse(r_fb_pred, r_fb_test$linweight)
+hist(r_fb_test$linweight-r_fb_pred, breaks=40)
+
+
+#Run the r_os model with the test data and plot Predictions vs Actual
+r_os_pred <- predict(r_os_model, newdata = r_os_test[, spec_col], type= "class")
+plot(r_os_pred, r_os_test$linweight)
+bb <- rmse(r_os_pred, r_os_test$linweight)
+hist(r_os_test$linweight-r_os_pred, breaks=40)
+
+
+#Run the l_fb model with the test data and plot Predictions vs Actual
+l_fb_pred <- predict(l_fb_model, newdata = l_fb_test[, spec_col], type= "class")
+plot(l_fb_pred, l_fb_test$linweight)
+dd <- rmse(l_fb_pred, l_fb_test$linweight)
+hist(l_fb_test$linweight-l_fb_pred, breaks=40)
+
+
+#Run the l_os model with the test data and plot Predictions vs Actual
+l_os_pred <- predict(l_os_model, newdata = l_os_test[, spec_col], type= "class")
+plot(l_os_pred, l_os_test$linweight)
+ee <- rmse(l_os_pred, l_os_test$linweight)
+hist(l_os_test$linweight-l_os_pred, breaks=40)
+
+
+#PRINT RMSE VARIABLES:
+groups <- c('RH_FB', 'RH_OS', 'LH_FB', 'LH_OS')
+all_rmse <- c(round(aa, 4), round(bb, 4), round(dd, 4), round(ee, 4))
+rmse_table <- data.frame(groups, all_rmse)
+rmse_table
+
+#Create frames of all data options for each pitch type for graphs
+create_pitch_dataframe <- function(seq_a, seq_b, seq_c, rel_height, extension, rel_side) {
+  n <- length(seq_a) * length(seq_b) * length(seq_c)
+  df <- data.frame(matrix(ncol = 6, nrow = n))
+  colnames(df) <- c('RelSpeed', 'InducedVertBreak', 'HorzBreak', 'RelHeight', 'Extension', 'RelSide')
+  
+  counter <- 1
+  for(a in seq_a) {
+    for(b in seq_b) {
+      for(c in seq_c) {
+        df[counter, ] <- c(a, b, c, rel_height, extension, rel_side)
+        counter <- counter + 1
+      }
+    }
+    print(a) # to track the loop progress as in your original code
+  }
+  return(df)
+}
+
+# Create dataframes
+r_fb_unique_pitch_values <- create_pitch_dataframe(70:100, 0:30, -5:30, 5.72, 5.63, 1.6)
+r_os_unique_pitch_values <- create_pitch_dataframe(60:90, -20:20, -25:25, 5.72, 5.63, 1.6)
+l_fb_unique_pitch_values <- create_pitch_dataframe(70:100, 0:30, -30:5, 5.72, 5.63, -1.3)
+l_os_unique_pitch_values <- create_pitch_dataframe(60:90, -20:20, -25:25, 5.72, 5.63, -1.3)
+
+
+#Predict values for pitches
+predict_all_r_fb <- predict(r_fb_model, newdata = r_fb_unique_pitch_values, type= "class")
+class(r_fb_model)
+r_fb_unique_pitch_values$prediction <- predict_all_r_fb
+predict_all_r_os <- predict(r_os_model, newdata = r_os_unique_pitch_values, type= "class")
+r_os_unique_pitch_values$prediction <- predict_all_r_os
+predict_all_l_fb <- predict(l_fb_model, newdata = l_fb_unique_pitch_values, type= "class")
+l_fb_unique_pitch_values$prediction <- predict_all_l_fb
+predict_all_l_os <- predict(l_os_model, newdata = l_os_unique_pitch_values, type= "class")
+l_os_unique_pitch_values$prediction <- predict_all_l_os
+
+
+#Report some parts of the tables to check predictions
+tail(r_fb_unique_pitch_values)
+head(r_os_unique_pitch_values)
+head(l_fb_unique_pitch_values)
+tail(l_os_unique_pitch_values)
+
+
+
+# Function to add and scale Stuff_plus variable
+add_and_scale_Stuff_plus <- function(df) {
+  # Add Stuff_plus and make it the negation of 'prediction'
+  df$Stuff_plus <- -df$prediction
+  
+  # Scale Stuff_plus
+  df <- df %>%
+    mutate_at(vars(Stuff_plus), function(x) scale(x)*50 + 100)
+  
+  return(df)
+}
+
+# Apply the function to each data frame
+r_fb_unique_pitch_values <- add_and_scale_Stuff_plus(r_fb_unique_pitch_values)
+r_os_unique_pitch_values <- add_and_scale_Stuff_plus(r_os_unique_pitch_values)
+l_fb_unique_pitch_values <- add_and_scale_Stuff_plus(l_fb_unique_pitch_values)
+l_os_unique_pitch_values <- add_and_scale_Stuff_plus(l_os_unique_pitch_values)
+
+
+#Export files that contain all unique predictions for average release points
+write.csv(r_fb_unique_pitch_values, file= 'C:/Users/david/Desktop/GMU Files/Baseball Internship/Pitching Report GMU/r_fb_all_predictions.csv')
+write.csv(r_os_unique_pitch_values, file= 'C:/Users/david/Desktop/GMU Files/Baseball Internship/Pitching Report GMU/r_os_all_predictions.csv')
+write.csv(l_fb_unique_pitch_values, file= 'C:/Users/david/Desktop/GMU Files/Baseball Internship/Pitching Report GMU/l_fb_all_predictions.csv')
+write.csv(l_os_unique_pitch_values, file= 'C:/Users/david/Desktop/GMU Files/Baseball Internship/Pitching Report GMU/l_os_all_predictions.csv')
+
+
+
+#Visualizing FB stuff model to check
+colors <- colorRampPalette(c("blue", "white", "red"))
+r_fb_unique_pitch_values %>%
+  filter(RelSpeed >= 85 & RelSpeed <= 87) %>%
+  ggplot(aes(x=HorzBreak, y=InducedVertBreak, fill=Stuff_plus, size=2)) +
+  geom_tile() + 
+  geom_point(aes(x=15, y=15)) +
+  scale_fill_gradientn(colors = colors(100)) +
+  coord_fixed(ratio = 1, xlim = c(0, 30), ylim = c(0, 30)) +
+  ggtitle("Stuff+ Heat Map", subtitle = "Pitcher's Perspective")
+  
+
+
